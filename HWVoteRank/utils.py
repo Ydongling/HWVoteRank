@@ -1,0 +1,279 @@
+from collections import defaultdict
+import logging
+from os.path import join
+from typing import Dict, List, Set
+
+# Libraries for matrix computations
+from matplotlib import rcParams
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
+
+NUM_miR = 1719
+NUM_mR = 20101
+NUM_TF = 839
+
+DATA_DIR = "./Data/"
+OUT_DIR = "./Output/"
+
+
+def configure_logging(logger):
+    """
+    This function intializes a logger to record logging statements.
+    """
+    # create console handler and set level to info
+    logger_handler = logging.StreamHandler() 
+    logger_handler.setLevel(logging.INFO)
+
+    # create formatter
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+    # add formatter to ch
+    logger_handler.setFormatter(formatter)
+
+    # add ch to logger
+    logger.addHandler(logger_handler)
+    
+
+def process_go_data(go_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    This function parses the enrichment profiles data downloaded from https://maayanlab.cloud/Enrichr/
+    Args:
+        go_df (pd.DataFrame): Pandas dataframe containing enrichment profiles.
+    Returns:
+        pd.DataFrame: Pandas dataframe containing processed enrichment profiles data.
+    """
+    go_enriched_terms_df = go_df.iloc[:10].copy()
+    go_enriched_terms_df['genes_split'] = go_enriched_terms_df.Genes.apply(lambda x: x.split(','))
+    #go_enriched_terms_df['enriched_terms'] = go_enriched_terms_df.Term.str.extract(r'\(([^)]+)')
+    go_enriched_terms_df['enriched_terms_1'] = go_enriched_terms_df.Term.apply(lambda x: x.split('~'))
+    
+    go_enriched=[]
+    for go_list in go_enriched_terms_df.enriched_terms_1:
+        go_enriched.append( go_list[0])
+        
+    go_enriched_terms_df['enriched_terms'] = go_enriched
+    return go_enriched_terms_df
+
+def get_top_20_drivers(enriched_terms_df: pd.DataFrame) -> List[str]:
+    """
+    This function retrieves top-20 drivers in top-10 enrichment terms.
+    Args:
+        enriched_terms_df (pd.DataFrame): Pandas dataframe containing enriched terms.
+    Returns:
+        pd.DataFrame: Pandas dataframe top-20 genes with highest frequency.
+    """
+    gene_count_dict = defaultdict(int)
+    for gene_list in enriched_terms_df.genes_split:
+        for gene in gene_list:
+            gene_count_dict[gene] += 1
+
+    gene_count_df = pd.DataFrame.from_dict(gene_count_dict, orient='index')
+    gene_count_df = gene_count_df.reset_index()
+    gene_count_df.columns = ['gene', 'count']
+    gene_count_df = gene_count_df.sort_values(by='count', ascending=False)
+    top_20_drivers = gene_count_df.gene.head(n=20).tolist()
+    return top_20_drivers
+
+def get_top_20_drivers_our(enriched_terms_df: pd.DataFrame) -> List[str]:
+    """
+    This function retrieves top-20 drivers in top-10 enrichment terms.
+    Args:
+        enriched_terms_df (pd.DataFrame): Pandas dataframe containing enriched terms.
+    Returns:
+        pd.DataFrame: Pandas dataframe top-20 genes with highest frequency.
+    """
+    
+    #enriched_terms_df = biological_10_enriched_terms
+    
+    gene_count_dict = defaultdict(int)
+    for gene_list in enriched_terms_df.genes_split:
+        for gene in gene_list:
+            gene_count_dict[gene] += 1
+
+    gene_count_df = pd.DataFrame.from_dict(gene_count_dict, orient='index')
+    gene_count_df = gene_count_df.reset_index()
+    gene_count_df.columns = ['gene', 'count']
+    
+# =============================================================================
+#     predicted_driver = pd.DataFrame(predicted_driver.node.tolist())
+#     predicted_driver.columns = ['gene']
+#     predicted_gene = pd.merge(gene_count_df, predicted_driver, on=['gene'], how='inner')
+# =============================================================================
+    
+    gene_count_df = gene_count_df.sort_values(by='count', ascending=False)
+    top_20_drivers = gene_count_df.gene.head(n=20).tolist()
+    return top_20_drivers
+
+
+def get_unique_genes(enriched_terms_df: pd.DataFrame) -> Set[str]:
+    """
+    This function finds the unique genes present in the enricheed terms.
+    Args:
+        enriched_terms_df (pd.DataFrame): Pandas dataframe containing enriched terms.
+    Returns:
+        Set[str]: Set of strings containing names of unique genes.
+    """
+    unique_genes_per_term = enriched_terms_df.genes_split.apply(lambda x: set(x))
+    unique_genes = set()
+    for genes in unique_genes_per_term:
+        unique_genes = unique_genes.union(genes)
+    return unique_genes
+
+
+def add_genes_as_columns(genes, df):
+    """
+    This function adds a column for a gene present in the enriched term and assigns 1 if the gene is present otherwise 0.
+    Args:
+        genes (Set[str]): Set of strings containing names of genes.
+        df (pd.DataFrame): Pandas dataframe enriched terms and the corresponding list of genes.
+    Returns:
+        pd.DataFrame: Pandas dataframe containing a column with a gene name. The rows correspond to enriched term and a value of 1 in a column indicates the gene is present in the enriched term.
+    """
+    for gene in genes:
+        df[gene] = 0
+        gene_in_encriched_term = df.genes_split.apply(lambda x: gene in x)
+        df.loc[gene_in_encriched_term, gene] = 1
+
+        
+def get_top_drivers_enriched_terms(df, top_20_drivers) -> pd.DataFrame:
+    """
+    This function creates a dataframe with genes as rows and enriched terms as columns. All the values in the dataframe have intereger types.
+    Args:
+        df (pd.DataFrame): Pandas dataframe containing enriched terms as rows and gene names as columns.
+        top_20_drivers (List[str]): List of strings containing top-20 frequent drivers.
+    Returns:
+        pd.DataFrame: Pandas dataframe with top-20 driver genes as rows and enriched terms as columns.
+    """
+    go_terms = df[['enriched_terms'] + top_20_drivers].T.copy()
+    go_terms.columns = go_terms.iloc[0]
+    go_terms = go_terms.drop('enriched_terms', axis=0)
+    go_terms = go_terms.astype('int')
+    return go_terms
+    
+    
+def find_coding_noncoding_drivers(critical_nodes: pd.DataFrame, protein_mutations: pd.DataFrame, miR_genes: List[str]) -> Dict[str, pd.DataFrame]:
+    """
+    This function merges the critical nodes identified using NIBNA with proteins and divides them into coding and non-coding drivers.
+    Args:
+        critical_nodes (pd.DataFrame): Pandas dataframe containing critical nodes.
+        protein_mutations (pd.DataFrame): Pandas dataframe containing proteints with mutations.
+        miR_genes (List[str]): List of miRNA genes.
+    Returns:
+        Dict[str, pd.DataFrame]: Dictionary containing coding drivers with mutations, coding drivers without mutations and non-coding drivers.
+    """
+    cancer_drivers_dict = dict()
+
+    candidate_cancer_drivers = critical_nodes.merge(protein_mutations, how='left', left_on='node', right_on='symbol').copy()
+    candidate_cancer_drivers["Type"] = "coding"
+    candidate_cancer_drivers.loc[candidate_cancer_drivers.node.isin(miR_genes), "Type"] = "non-coding"
+
+
+    coding_candidate_cancer_drivers = candidate_cancer_drivers.loc[candidate_cancer_drivers.Type=='coding'].copy()
+    coding_candidate_cancer_drivers = coding_candidate_cancer_drivers.sort_values(by='importance', ascending=False)
+
+    coding_candidate_cancer_drivers_mutations = coding_candidate_cancer_drivers.loc[~pd.isna(coding_candidate_cancer_drivers.weight)].copy()
+    coding_candidate_cancer_drivers_no_mutations = coding_candidate_cancer_drivers.loc[pd.isna(coding_candidate_cancer_drivers.weight)].copy()
+
+    # Candidate non-coding cancer drivers
+    noncoding_candidate_cancer_drivers = candidate_cancer_drivers.loc[candidate_cancer_drivers.Type=='non-coding'].copy()
+    
+    cancer_drivers_dict['coding_drivers_mutations'] = coding_candidate_cancer_drivers_mutations
+    cancer_drivers_dict['coding_drivers_no_mutations'] = coding_candidate_cancer_drivers_no_mutations
+    cancer_drivers_dict['noncoding_drivers'] = noncoding_candidate_cancer_drivers
+    return cancer_drivers_dict
+
+    
+def compute_mutation_count(coding_drivers_mutations: pd.DataFrame, mutation_subtypes:pd.DataFrame, cancer_subtype: str):
+    """
+    This function computes the frequency of count of the predicted coding drivers with mutations and selects the gene with the highest frequency.
+    Args:
+        coding_drivers_mutations(pd.DatFrame): Pandas dataframe containing predicted coding drivers with mutations.
+        mutation_subtype (pd.DataFrame): Pandas dataframe containing mutation subtypes.
+        cancer_subtype (str): String specifying the cancer subtype.
+    Returns:
+        Pandas dataframe containing coding drivers with mutations having the highest frequency count for the given cancer subtype.
+    """
+    subtype_mutation = []
+
+    for gene in coding_drivers_mutations.node.values:
+        temp = mutation_subtypes.loc[mutation_subtypes.symbol == gene,].copy()
+        if all(temp.Call.isna()):
+            subtype_mutation.append(np.nan)
+            continue
+        cancer_subtype_counts = temp.Call.value_counts()
+        cancer_subtype_counts = cancer_subtype_counts.sort_index()
+        subtype_mutation.append(cancer_subtype_counts.index[np.argmax(cancer_subtype_counts)])
+
+    coding_drivers_mutations['Subtype'] = subtype_mutation
+    coding_drivers_mutations = coding_drivers_mutations.loc[coding_drivers_mutations.Subtype == cancer_subtype,]
+    return coding_drivers_mutations
+    
+def plot_node_importance(node_importance: np.array, threshold: int, network_name: str, out_dir: str):
+    """
+    Plot node importance scores of genes and save it in specified directory.
+    Args:
+        node_importance (np.array): Numpy array containing node importance scores in decrasing order.
+        threshold (int): Integer specifying last node with importance score greater than the threshold value.
+        network_name (str): String specifying the condition-specific network for which node importance is computed.
+        out_dir (str): String specifying output directory to save the plot.
+    """
+    plt.scatter(np.arange(len(node_importance)), node_importance, marker='o', linestyle='-', color='blue')
+    plt.xlabel('Genes')
+    plt.ylabel('Node Importance score')
+    plt.axvline(threshold, color='red', linestyle='--', label=f'threshold={threshold}')
+    plt.legend(loc='upper right')
+    plt.title(f'Node importance in {network_name} network')
+    plt.savefig(join(out_dir, f'{network_name}_node_importance.jpg'))
+    plt.close()
+    
+def plot_precision_recall_curves(top_k_precision: np.array, top_k_recall: np.array, top_k_f1: np.array, out_dir: str):
+    """
+    Plot precision, recall and f1 scores. The plots are stored in the out_dir.
+    Args:
+        top_k_precision: precision scores for different top-k thresholds
+        top_k_recall: recall scores for different top-k thresholds
+        top_k_f1: f1 scores for different top-k thresholds
+    """
+    plt.plot(top_k_precision, color='blue', marker='+', linestyle='-', linewidth=1)
+    plt.xlabel('Top N genes')
+    plt.ylabel('Precision according to CGC')
+    plt.ylim([0, 1.1])
+    plt.yticks(np.arange(0, 1.1, 0.2))
+    plt.title('Precision Comparison')
+    plt.savefig(join(out_dir, 'precision.jpg'))
+    plt.close()
+    plt.plot(top_k_recall, color='blue', marker='+', linestyle='-', linewidth=1)
+    plt.xlabel('Top N genes')
+    plt.ylabel('Recall according to CGC')
+    plt.title('Recall Comparison')
+    plt.savefig(join(out_dir, 'recall.jpg'))
+    plt.close()
+    plt.plot(top_k_f1, color='blue', marker='+', linestyle='-', linewidth=1)
+    plt.xlabel('Top N genes')
+    plt.ylabel('F1 Score according to CGC')
+    plt.title('F1 Score Comparison')
+    plt.savefig(join(out_dir, 'f1_score.jpg'))
+    plt.close()
+
+
+def plot_heatmap(go_terms: pd.DataFrame, out_dir: str, go_process: str = "GO Biological Process"):
+    """
+    This function creates a heatmap for the GO enirchment profiles.
+    Args:
+        go_terms (pd.DataFrame): Pandas dataframe containing top-20 drivers as rows and enriched terms as columns.
+        out_dir (str): String specifying directory to store the heatmap.
+        go_process (str): String specifying either GO Biological Process of GO Molecular function as plot title.
+    """
+    rcParams['figure.figsize'] = 10, 7
+    sns.heatmap(go_terms, cmap="Blues", linewidths=1, linecolor='black', cbar=False, vmin=0, vmax=1)
+    plt.xlabel('Enriched Terms', fontsize=18)
+    plt.ylabel('Predicted Cancer Drivers', fontsize=18)
+    plt.xticks(fontsize=14)
+    plt.yticks(fontsize=14)
+    plt.xticks(rotation=-60)
+    plt.title(go_process, fontsize=20)
+    plt.tight_layout()
+    plt.savefig(join(out_dir, go_process + ' Heatmap.eps'), bbox_inches = "tight")
+    plt.close()

@@ -1,0 +1,134 @@
+# Standard libraries
+import datetime
+import logging
+import os
+from os.path import join
+from typing import List
+
+# Libraries for graphs
+import community
+import networkx as nx
+
+# Libraries for matrix computations
+import numpy as np
+import pandas as pd
+
+# Import functions from HWVoteRank module
+from HWVoteRank.network_node_importance import build_graph_from_edge_list, compute_pearson_correlation, compute_top_k_precision_recall, HWVoteRank, validate_top_k_coding_genes
+from HWVoteRank.utils import configure_logging, find_coding_noncoding_drivers, plot_node_importance, plot_precision_recall_curves, DATA_DIR, OUT_DIR, NUM_miR
+from HWVoteRank.HWVoteRank_code import HWVoteRank
+
+import matplotlib.pyplot as plt
+#DATA_DIR = "./Data"
+# OUT_DIR = "./Output/"
+
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+
+if __name__ =="__main__":
+    configure_logging(logger)
+    
+    start_time = datetime.datetime.now()
+    
+    top_k = [50, 100, 150, 200,250]
+    top_k_validated_coding_genes = []
+    
+    logger.info("Reading cancer network edge list")
+    cancer_network = pd.read_csv(join(DATA_DIR, 'CancerDriver', 'Cancer', 'pVal_cancer_network.csv'))
+
+    logger.info("Reading cancer gene expression data")
+    cancer_df = pd.read_csv(join(DATA_DIR, 'CancerDriver', 'Cancer', 'cancer_data.csv'))
+
+    logger.info("Reading gold standard CGC data")
+    gold_standard_cgc_df = pd.read_csv(join(DATA_DIR, 'CancerDriver', 'Cancer', 'Census_allFri Sep 28 07_39_37 2018.tsv'), sep="\t")
+    gold_standard_cgc = gold_standard_cgc_df["Gene Symbol"]
+
+    logger.info("Reading mRNAs data")
+    mRNAs_df = pd.read_csv(join(DATA_DIR, 'CancerDriver', 'Cancer', 'mRNAs_data.csv'))
+    
+    protein_mutations = pd.read_csv(join(DATA_DIR, 'protein_affecting_mutations.csv'))
+    mutation_subtypes = pd.read_csv(join(DATA_DIR, 'mutation_subtypes.csv'))
+    
+    logger.info('Reading OncomiR drivers associated with tumorigenesis of BRCA')
+    oncomir_mirna_drivers = pd.read_csv(join(DATA_DIR, 'OncomiR_miRNA_drivers.csv'))
+          
+    logger.info("Computing pearson correlation coefficient")
+    cancer_network = compute_pearson_correlation(cancer_network, cancer_df)
+     
+    logger.info("Building graph from cancer network edge list with pearson correlation as edge weights")
+    G = build_graph_from_edge_list(cancer_network, is_weighted=True)
+    
+    
+
+    
+
+    
+    F = voterank_plus(G,500, 0.1,0.1)
+    FF= pd.DataFrame(F, columns=['node', 'importance']) 
+    critical_nodes=FF
+    
+    threshold_value = 1/len(G.nodes())
+    node_threshold = (critical_nodes.importance > threshold_value).sum() # select nodes with importance score > 1/n
+    logger.info(f'Node importance threshold: {threshold_value}, threshold: {node_threshold}')
+    critical_nodes = critical_nodes.iloc[:node_threshold].copy()
+    
+    if not os.path.exists(join(OUT_DIR, 'CancerDriver', 'Cancer')):
+        os.makedirs(join(OUT_DIR, 'CancerDriver', 'Cancer'))
+    critical_nodes.to_csv(join(OUT_DIR, 'CancerDriver', 'Cancer','critical_nodes.csv'))
+    plot_node_importance(critical_nodes.importance.to_numpy(), node_threshold, 'cancer', join(OUT_DIR, 
+                                                                                                  'CancerDriver', 'Cancer'))
+
+    logger.info('Identifying coding drivers with mutations, coding drivers without mutations and non-coding drivers')
+    cancer_drivers_dict = find_coding_noncoding_drivers(critical_nodes, protein_mutations,
+                                                            cancer_df.columns[:NUM_miR])
+    
+    logger.info("Validating node importance scores with gold standard cgc")
+    
+    num_top_k_validated_genes = []    
+    top_k_validated_coding_genes = list()
+    np.random.seed(10)
+    for k in top_k:
+        top_k_coding_genes = validate_top_k_coding_genes(cancer_drivers_dict['coding_drivers_mutations'], mRNAs_df,
+                                                         gold_standard_cgc, k)
+        top_k_precision, top_k_recall = compute_top_k_precision_recall(cancer_drivers_dict['coding_drivers_mutations'],
+                                                                       mRNAs_df, gold_standard_cgc)
+        top_k_f1 = (2 * top_k_precision * top_k_recall)/(top_k_precision + top_k_recall + 1e-6)
+        plot_precision_recall_curves(top_k_precision, top_k_recall, top_k_f1, join(OUT_DIR, 'CancerDriver', 'Cancer'))
+        performance_metrics_df = pd.DataFrame(zip(np.arange(top_k[-1]), top_k_precision, top_k_recall, top_k_f1), 
+                                              columns=['k', 'precision', 'recall', 'f1'])
+        performance_metrics_df.to_csv(join(OUT_DIR, 'CancerDriver', 'Cancer', 'performance_metrics_new.csv'))
+        # Write results to csv file
+        top_k_coding_genes.to_csv(join(OUT_DIR, 'CancerDriver', 'Cancer', f'top_k_{k}_validated_genes.csv'))
+
+        num_top_k_validated_genes.append((top_k_coding_genes['In CGC']=='Yes').sum())
+    
+    num_top_k_validated_genes = np.array(num_top_k_validated_genes).reshape(1, -1)
+    num_top_k_validated_genes = pd.DataFrame(num_top_k_validated_genes, columns=['top-50', 'top-100', 'top-150', 'top-200', 'top-200'])
+    num_top_k_validated_genes.to_csv(join(OUT_DIR, 'CancerDriver', 'Cancer',"top_k_validated_genes_weighted.csv"))
+
+    logger.info("Number of top-K coding driver genes found")
+    logger.info("{0}".format(num_top_k_validated_genes))
+    
+    no_mutations_cancer_drivers = cancer_drivers_dict['coding_drivers_no_mutations']
+    no_mutations_index = np.array (no_mutations_cancer_drivers.index.tolist())
+
+    logger.info('Validating non-coding drivers with OncomiR cancer drivers')
+    noncoding_candidate_cancer_drivers = cancer_drivers_dict['noncoding_drivers']
+    noncoding_candidate_cancer_drivers['In OncomiR'] = 'No'
+
+    noncoding_candidate_cancer_drivers.loc[noncoding_candidate_cancer_drivers.node.isin(oncomir_mirna_drivers.iloc[:, 0]),
+                                      'In OncomiR'] = 'Yes'
+    
+                                   
+    logger.info(f"Non-coding drivers validated using OncomiR: {(noncoding_candidate_cancer_drivers['In OncomiR']=='Yes').sum()}")
+    
+    cancer_drivers_dict['coding_drivers_mutations'].to_csv(join(OUT_DIR, 'CancerDriver', 'Cancer', 'coding_candidate_drivers_mutations.csv'))
+    cancer_drivers_dict['coding_drivers_no_mutations'].to_csv(join(OUT_DIR, 'CancerDriver', 'Cancer', 'coding_candidate_drivers_no_mutations.csv'))
+    noncoding_candidate_cancer_drivers.to_csv(join(OUT_DIR, 'CancerDriver', 'Cancer', 'noncoding_candidate_drivers.csv'))    
+
+
+    logger.info("Experiment took {0} seconds".format((datetime.datetime.now() - start_time).seconds))
+    
+    
